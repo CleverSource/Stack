@@ -53,8 +53,8 @@ local function simulate_program(program)
     end
 end
 
-local function compile_program(program)
-    local out = io.open("output.asm", "w")
+local function compile_program(program, out_file_path)
+    local out = io.open(out_file_path, "w")
     if out then
         out:write("segment .text\n")
         out:write("dump:\n")
@@ -123,28 +123,73 @@ local function compile_program(program)
     end
 end
 
-local function parse_word_as_op(word)
-    assert(COUNT_OPS == 4, "Exhaustive op handling in parse_word_as_op")
-    if word == "+" then
+local function parse_token_as_op(token)
+    local file_path, row, col, token = table.unpack(token)
+    assert(COUNT_OPS == 4, "Exhaustive op handling in parse_token_as_op")
+    if token == "+" then
         return plus()
-    elseif word == "-" then
+    elseif token == "-" then
         return minus()
-    elseif word == "." then
+    elseif token == "." then
         return dump()
     else
-        return push(tonumber(word))
+        local success, result = pcall(function() return tonumber(token) end)
+        if success and result then
+            return push(tonumber(token))
+        else
+            print(("%s:%d:%d: %s"):format(file_path, row, col, ("Invalid literal for tonumber() with base 10: `%s`"):format(token)))
+            os.exit(1)
+        end
     end
 end
 
-local function load_program_from_file(file_path)
+local function find_col(line, start, predicate)
+    while start <= #line and not predicate(line:sub(start, start)) do
+        start = start + 1
+    end
+    return start
+end
+
+local function lex_line(line)
+    local col = find_col(line, 1, function(x) return x:match("%s") == nil end)
+    local tokens = {}
+    while col <= #line do
+        local col_end = find_col(line, col, function(x) return x:match("%s") ~= nil end) - 1
+        table.insert(tokens, { col, line:sub(col, col_end) })
+        col = find_col(line, col_end + 1, function(x) return x:match("%s") == nil end)
+    end
+    return tokens
+end
+
+local function lex_file(file_path)
     local f = io.open(file_path, "r")
-    local program = {}
+    local result = {}
     if f then
-        for word in f:read("*a"):gmatch("%S+") do
-            table.insert(program, parse_word_as_op(word))
+        local row = 1
+        for line in f:lines() do
+            for _, token in ipairs(lex_line(line)) do
+                table.insert(result, { file_path, row, token[1], token[2] })
+            end
+            row = row + 1
         end
+        
+        f:close()
+    end
+    return result
+end
+
+local function load_program_from_file(file_path)
+    local program = {}
+    local tokens = lex_file(file_path)
+    for _, token in ipairs(tokens) do
+        table.insert(program, parse_token_as_op(token))
     end
     return program
+end
+
+local function cmd_echoed(cmd)
+    print(("[CMD] %s"):format(cmd))
+    os.execute(cmd)
 end
 
 local function usage()
@@ -152,11 +197,7 @@ local function usage()
     print("SUBCOMMANDS:")
     print("    sim <file>        Simulate the program")
     print("    com <file>        Compile the program")
-end
-
-local function call_cmd(cmd)
-    print(cmd)
-    os.execute(cmd)
+    print("    help              Print this help to stdout and exit with 0 code")
 end
 
 local function uncons(xs)
@@ -167,7 +208,7 @@ local argv = arg
 local subcommand = nil
 local program_path = nil
 
-assert(#argv >= 1)
+assert(#argv >= 0)
 
 if #argv < 1 then
     usage()
@@ -194,9 +235,18 @@ elseif subcommand == "com" then
     end
     program_path, argv = uncons(argv)
     local program = load_program_from_file(program_path)
-    compile_program(program)
-    call_cmd("nasm -f elf64 output.asm")
-    call_cmd("ld -o output output.o")
+    local stack_ext = ".stack"
+    local basename = program_path:match("^.+/(.+)$") or program_path
+    if basename:sub(-#stack_ext) == stack_ext then
+        basename = basename:sub(1, -#stack_ext - 1)
+    end
+    print(("[INFO] Generating %s"):format(basename .. ".asm"))
+    compile_program(program, basename .. ".asm")
+    cmd_echoed(("nasm -f elf64 %s"):format(basename .. ".asm"))
+    cmd_echoed(("ld -o %s %s"):format(basename, basename .. ".o"))
+elseif subcommand == "help" then
+    usage()
+    os.exit(0)
 else
     usage()
     print(("ERROR: unknown subcommand %s"):format(subcommand))
